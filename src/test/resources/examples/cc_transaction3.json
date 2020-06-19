@@ -1,0 +1,13 @@
+{
+ "transactionId" : "2L7459789AB2311",
+ "card": {
+	"issuer": "VISA",
+	"number": "4485409137165386",
+	"exp": "05/2024"
+},
+ "transactionDate" : "2020-05-23T23:03:19Z",
+ "amount": 533.99,
+ "currency": "USD",
+ "merchantNr" : "1111555599992222",	
+ "saleLocation" : "Denver"
+}

@@ -1,0 +1,197 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:scripting="http://www.mulesoft.org/schema/mule/scripting" xmlns:retail-orders-system-api="http://www.mulesoft.org/schema/mule/retail-orders-system-api"
+	xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns:http="http://www.mulesoft.org/schema/mule/http" xmlns:redis="http://www.mulesoft.org/schema/mule/redis" xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/redis http://www.mulesoft.org/schema/mule/redis/current/mule-redis.xsd
+http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+http://www.mulesoft.org/schema/mule/scripting http://www.mulesoft.org/schema/mule/scripting/current/mule-scripting.xsd">
+	<configuration-properties doc:name="Configuration properties" doc:id="d78eab9e-fda4-4b6d-adb8-8b5d77e36f58" file="application.properties" />
+	<redis:redis-config name="Redis_Redis" doc:name="Redis Redis" doc:id="79ddbc93-4509-475d-94f0-e5dc28b4e2c6" >
+		<redis:nonclustered-connection host="${redis.host}" port="${redis.port}" connectionTimeout="${connection.timeout}" />
+	</redis:redis-config>
+	<http:listener-config name="HTTP_Listener_config" doc:name="HTTP Listener config" doc:id="6babaefc-1707-4964-94c9-5b6a82a5d0f5" basePath="/">
+		<http:listener-connection host="0.0.0.0" port="8081" />
+	</http:listener-config>
+	<http:request-config name="OpenStreetMap" doc:name="HTTP Request configuration" doc:id="7dffa300-201a-46c5-8534-fa54998ef564" >
+		<http:request-connection host="nominatim.openstreetmap.org" />
+	</http:request-config>
+	<flow name="fraud-check" doc:id="8408273a-242d-4461-b6d7-6e1cd411b7e9">
+		<http:listener doc:name="/check-cc-transaction" doc:id="8469cdb8-f0c4-465f-b77e-9eb2553e6cff" config-ref="HTTP_Listener_config" path="/check-cc-transaction" allowedMethods="POST" />
+		<flow-ref doc:name="insert-transaction-into-store" doc:id="4226b9d8-2e3d-42b6-ac03-95ed3b3348c7" name="insert-transaction-into-store" />
+		<flow-ref doc:name="check-cc-transaction" doc:id="84e4e692-c70b-40f5-b788-5a05600ac1a6" name="check-cc-transaction"/>
+	</flow>
+	<flow name="insert-transaction-into-store" doc:id="626d37a2-18fd-41d0-bc99-17d08ba8f8d7" >
+		<ee:transform doc:name="Set variables" doc:id="065eb2da-463e-4d17-b12c-51914ec0cfef" >
+			<ee:message >
+			</ee:message>
+			<ee:variables >
+				<ee:set-variable variableName="storeKey" ><![CDATA[%dw 2.0
+output application/java
+---
+"CARD-" ++ payload.card.number]]></ee:set-variable>
+				<ee:set-variable variableName="transactionTimestamp" ><![CDATA[%dw 2.0
+output application/java
+---
+payload.transactionDate]]></ee:set-variable>
+				<ee:set-variable variableName="storeKeyExpiration" ><![CDATA[%dw 2.0
+output application/java
+---
+(now() as Number {unit: "seconds"}) 
++ p('fraud.check.entry.ttl.secs') as Number]]></ee:set-variable>
+			</ee:variables>
+		</ee:transform>
+		<flow-ref doc:name="set var saleCoordinates" doc:id="5c45c1ea-4165-48e0-be1a-1fba26399089" name="get-sale-location-coordinates" target="saleCoordinates"/>
+		<ee:transform doc:name="Add saleCoordinates to payload" doc:id="4992f8c0-f189-42ef-ba81-2a91fa9a8f20" >
+			<ee:message >
+				<ee:set-payload ><![CDATA[%dw 2.0
+output application/json
+---
+payload update {
+	case coord at .saleCoordinates! -> if (coord == null) vars.saleCoordinates else coord
+}]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+		<scripting:execute engine="groovy" doc:name="Compute var timestampScore" doc:id="b6cd986c-090d-4848-bf77-b6ee8e2d2074" target="timestampScore">
+			<scripting:code><![CDATA[import java.time.*
+
+// parse and get epoch millis for transactionTimestamp
+epochMillis=Date.parse("yyyy-MM-dd'T'HH:mm:ss'Z'", vars.transactionTimestamp).getTime()
+
+// return score
+return ( - epochMillis /1000)]]></scripting:code>
+		</scripting:execute>
+		<redis:add-to-sorted-set doc:name="Insert into store" doc:id="669c4825-e15f-4e5a-bcad-95c33ced8cd8" config-ref="Redis_Redis" key='#[vars.storeKey]' score="#[vars.timestampScore]">
+			<redis:value><![CDATA[#[output application/java
+---
+payload.^raw as String]]]></redis:value>
+		</redis:add-to-sorted-set>
+		<redis:expire-at unixTime="#[vars.storeKeyExpiration]" doc:name="Update expiration time for store key" doc:id="5be72a19-27d3-465e-a520-09788913adda" config-ref="Redis_Redis" key="#[vars.storeKey]" target="isTimeOutSet"/>
+	</flow>
+	<flow name="check-cc-transaction" doc:id="3aa80e4e-aeed-4e99-b2d5-b89929821f4c" >
+		<set-variable value="#[payload]" doc:name="payload to originalTransaction" doc:id="f6b6b94c-e3f2-4ccc-a402-595ee7375d46" variableName="originalTransaction"/>
+		<ee:transform doc:name="current transaction geocoordinates" doc:id="a7bbc43b-d134-4333-ac21-feb61dd817d9" >
+			<ee:message >
+			</ee:message>
+			<ee:variables >
+				<ee:set-variable variableName="currentTransactionGeoCoordinates" ><![CDATA[%dw 2.0
+output application/java
+var transactionJson = read(vars.originalTransaction, "application/json")
+---
+{ lon: transactionJson.saleCoordinates.coordinates[0],
+  lat: transactionJson.saleCoordinates.coordinates[1]
+}]]></ee:set-variable>
+			</ee:variables>
+		</ee:transform>
+		<set-variable value="#[output application/java --- []]" doc:name="flaggedTransactions = []" doc:id="f4dee3e5-d33f-45e8-baeb-c2872f0c1b8b" variableName="flaggedTransactions"/>
+		<redis:get-range-by-score doc:name="Get range by score" doc:id="d4b713e6-569e-473e-93dd-40a586c6ca8c" config-ref="Redis_Redis" key="#[vars.storeKey]" min="#[vars.timestampScore - p('trans.time.tolerance.secs') as Number]" max="#[vars.timestampScore + p('trans.time.tolerance.secs') as Number]"/>
+		<foreach doc:name="For Each" doc:id="b83c0f4f-fb5f-400b-b529-e1f8ca25d130" collection="#[payload]">
+			<flow-ref doc:name="compute-mutual-distance-pos" doc:id="9acefcf1-e340-4965-8d62-4dee7730f21d" name="compute-mutual-distance-pos" target="distanceInKM"/>
+			<flow-ref doc:name="check-transaction-pos-distance" doc:id="9e280348-5509-4f83-8878-96dab0517e41" name="check-transaction-pos-distance"/>
+		</foreach>
+		<ee:transform doc:name="Format response" doc:id="22e69e1f-51b2-45e0-9443-6d1b9052f55f" >
+			<ee:message >
+				<ee:set-payload ><![CDATA[%dw 2.0
+output application/json
+var originalTransaction = read(vars.originalTransaction, "application/json")
+---
+{
+    transactionId: originalTransaction.transactionId,
+	transactionDate: originalTransaction.transactionDate,
+	amount: originalTransaction.amount,
+	currency: originalTransaction.currency,
+	saleLocation: originalTransaction.saleLocation,
+	flaggedTransactions: vars.flaggedTransactions
+}
+]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+	</flow>
+	<flow name="get-sale-location-coordinates" doc:id="1befb9ab-e870-4cdc-9c93-6de73bf70cc2" >
+		<http:request method="GET" doc:name="Get sale location info" doc:id="1c838c7b-4dcb-4421-9f69-a373bf665b92" config-ref="OpenStreetMap" path="search.php">
+			<http:headers ><![CDATA[#[output application/java
+---
+{
+	"user-agent" : "PostmanRuntime/2.4.2"
+}]]]></http:headers>
+			<http:query-params ><![CDATA[#[output application/java
+---
+{
+	"q" : payload.saleLocation,
+	"format": "geojson"
+}]]]></http:query-params>
+		</http:request>
+		<ee:transform doc:name="Map only geocoordinates" doc:id="41d9ef16-9ec7-4ae1-98c4-9385db96d8b7">
+			<ee:message>
+				<ee:set-payload><![CDATA[%dw 2.0
+output application/java
+---
+payload.features[0].geometry]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+	</flow>
+	<flow name="compute-mutual-distance-pos" doc:id="55481c9c-a84c-4a38-9415-400f87fe64c2" >
+		<ee:transform doc:name="var targetCoord" doc:id="ac6e8e2f-0e18-4047-a777-3cb6c3d9b4a4">
+				<ee:message>
+				</ee:message>
+				<ee:variables>
+					<ee:set-variable variableName="targetCoord"><![CDATA[%dw 2.0
+output application/java
+var transactionJson = read(payload, "application/json")
+---
+{ lon: transactionJson.saleCoordinates.coordinates[0],
+  lat: transactionJson.saleCoordinates.coordinates[1]
+}]]></ee:set-variable>
+				</ee:variables>
+			</ee:transform>
+		<scripting:execute doc:name="Compute distance in KM" doc:id="03705ea4-9e67-4a6a-97ca-948bf3591164" engine="groovy">
+			<scripting:code ><![CDATA[// current transaction location
+def lat1=vars.currentTransactionGeoCoordinates.lat
+def lon1=vars.currentTransactionGeoCoordinates.lon
+// coordinates other transaction location
+def lat2=vars.targetCoord.lat
+def lon2=vars.targetCoord.lon
+
+// compute approx. lineardistance in meters using Spherical Law of Cosines
+def  R = 6371e3
+def phi1= lat1 * Math.PI/180
+def phi2= lat2 * Math.PI/180
+def deltaPhi = (lat2 - lat1) * Math.PI/180
+def deltaLambda = (lon2 - lon1) * Math.PI/180
+
+ return (Math.acos(Math.sin(phi1) * Math.sin(phi2) 
+ + Math.cos(phi1) * Math.cos(phi2) * Math.cos(deltaLambda)) * R) / 1000
+
+]]></scripting:code>
+		</scripting:execute>
+		<logger level="INFO" doc:name="Logger" doc:id="b48885d2-631b-44aa-b5c4-be763bcd9147" message="#[vars.targetCoord]" />
+	</flow>
+	<flow name="check-transaction-pos-distance" doc:id="6753a18b-efe6-4d24-b310-e8b3f904235e" >
+		<choice doc:name="distance less than tolerance?" doc:id="0b183d0e-a371-4519-8ab1-df94e49ead3f" >
+			<when expression="#[vars.distanceInKM as Number &gt; p('trans.distance.tolerance.km') as Number]">
+				<ee:transform doc:name="Collect into flaggedTransactions with distance" doc:id="781484a7-fedf-4fc6-a7d0-002773a65e66" >
+					<ee:message >
+					</ee:message>
+					<ee:variables >
+						<ee:set-variable variableName="flaggedTransactions" ><![CDATA[%dw 2.0
+output application/json
+var flaggedTransaction = read(payload, "application/json")
+var flaggedTransactionWithDistance = {
+	transactionId: flaggedTransaction.transactionId,
+	transactionDate: flaggedTransaction.transactionDate,
+	amount: flaggedTransaction.amount,
+	currency: flaggedTransaction.currency,
+	saleLocation: flaggedTransaction.saleLocation,
+	timeGapWithCurrentTransactionDays: daysBetween(vars.transactionTimestamp as Date, flaggedTransaction.transactionDate as Date),
+	geoDistanceWithCurrentTransactionKM: vars.distanceInKM as Number as String {format: "####"} 
+} 
+---
+	vars.flaggedTransactions default [] 
+	++ [flaggedTransactionWithDistance]]]></ee:set-variable>
+					</ee:variables>
+				</ee:transform>
+			</when>
+		</choice>
+	</flow>
+</mule>

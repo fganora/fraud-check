@@ -1,0 +1,20 @@
+{
+  "transactionId": "2L7459789AB2302",
+  "card": {
+    "issuer": "VISA",
+    "number": "4485409137165386",
+    "exp": "05/2024"
+  },
+  "transactionDate": "2020-05-22T23:03:19Z",
+  "amount": 51.99,
+  "currency": "USD",
+  "merchantNr": "1111555599996666",
+  "saleLocation": "Chicago",
+  "saleCoordinates": {
+    "type": "Point",
+    "coordinates": [
+      -87.6244212,
+      41.8755616
+    ]
+  }
+}
